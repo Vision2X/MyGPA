@@ -1,24 +1,26 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/lib/supabaseClient';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
-import { Loader2, FileText, Settings, Download, Palette, Eye, Save } from 'lucide-react';
+import { Loader2, FileText, Settings, Download, Eye } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { gradePointMapSL, getGpaClass, calculateGpa } from '@/components/gpa-calculator/gpaUtils'; // Assuming this path is correct
+import { gradePointMapSL, getGpaClass, calculateGpa } from '@/components/gpa-calculator/gpaUtils';
+import { loadFromLocalStorage } from '@/lib/localStorageManager';
+
+const PROFILES_STORAGE_KEY = 'mygpa_profiles';
+const GPA_DATA_STORAGE_KEY_PREFIX = 'mygpa_gpa_data_';
+const TASKS_STORAGE_KEY_PREFIX = 'mygpa_tasks_';
 
 const CvBuilderPage = () => {
   const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
 
   const [profile, setProfile] = useState(null);
-  const [academicYears, setAcademicYears] = useState([]);
-  const [semesters, setSemesters] = useState([]);
-  const [modules, setModules] = useState([]);
+  const [academicData, setAcademicData] = useState([]); // For GPA data
   const [tasks, setTasks] = useState([]);
   
   const [loadingData, setLoadingData] = useState(true);
@@ -31,45 +33,31 @@ const CvBuilderPage = () => {
   });
   const [generatedCvHtml, setGeneratedCvHtml] = useState('');
 
-  const fetchData = useCallback(async (tableName, filters = {}) => {
-    if (!user) return [];
-    let query = supabase.from(tableName).select('*').eq('user_id', user.id);
-    Object.entries(filters).forEach(([key, value]) => {
-      query = query.eq(key, value);
-    });
-    const { data, error } = await query.order('created_at', { ascending: true });
-    if (error) {
-      console.error(`Error fetching ${tableName}:`, error);
-      return [];
-    }
-    return data;
-  }, [user]);
+  const getGpaStorageKey = useCallback(() => `${GPA_DATA_STORAGE_KEY_PREFIX}${user.id}`, [user]);
+  const getTasksStorageKey = useCallback(() => `${TASKS_STORAGE_KEY_PREFIX}${user.id}`, [user]);
 
   useEffect(() => {
     const loadAllData = async () => {
       if (!user) return;
       setLoadingData(true);
-      const [profileData, yearsData, semestersData, modulesData, tasksData] = await Promise.all([
-        supabase.from('profiles').select('*').eq('id', user.id).single(),
-        fetchData('academic_years'),
-        fetchData('semesters'),
-        fetchData('modules'),
-        fetchData('milestones') // tasks are stored in milestones table
-      ]);
+      
+      const profiles = loadFromLocalStorage(PROFILES_STORAGE_KEY, []);
+      const userProfile = profiles.find(p => p.id === user.id);
+      setProfile(userProfile);
 
-      if (profileData.data) setProfile(profileData.data);
-      setAcademicYears(yearsData);
-      setSemesters(semestersData);
-      setModules(modulesData);
-      setTasks(tasksData.filter(task => task.is_completed)); // Only completed tasks/achievements
+      const userAcademicData = loadFromLocalStorage(getGpaStorageKey(), []);
+      setAcademicData(userAcademicData);
+      
+      const userTasks = loadFromLocalStorage(getTasksStorageKey(), []);
+      setTasks(userTasks.filter(task => task.is_completed)); // Only completed tasks/achievements
       
       setLoadingData(false);
     };
 
-    if (user) {
+    if (user && !authLoading) {
       loadAllData();
     }
-  }, [user, fetchData]);
+  }, [user, authLoading, getGpaStorageKey, getTasksStorageKey]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -79,7 +67,7 @@ const CvBuilderPage = () => {
     }));
   };
 
-  const generateCvPreview = () => {
+  const generateCvPreview = useCallback(() => {
     if (!profile) return "<p>Loading profile data...</p>";
 
     let html = `<div class="cv-preview font-sans p-8 bg-white text-gray-800 shadow-lg max-w-4xl mx-auto border border-gray-200 rounded-lg">`;
@@ -96,20 +84,23 @@ const CvBuilderPage = () => {
       html += `<p class="text-gray-700 whitespace-pre-wrap">${cvData.personalStatement}</p></section>`;
     }
 
-    if (cvData.includeEducation && academicYears.length > 0) {
+    if (cvData.includeEducation && academicData.length > 0) {
       html += `<section class="mb-6"><h2 class="text-xl font-semibold border-b-2 border-purple-500 pb-1 mb-2 text-purple-600">Education</h2>`;
       html += `<p class="text-gray-700 font-medium">${profile.degree_program || 'Your Degree'} - ${profile.university_name || 'Your University'}</p>`;
       
-      const overallUserModules = modules.filter(m => m.grade && m.grade !== '');
-      const { gpa: overallGpa } = calculateGpa(overallUserModules);
+      let allModulesForOverall = [];
+      academicData.forEach(year => year.semesters.forEach(semester => allModulesForOverall.push(...semester.modules)));
+      const { gpa: overallGpa } = calculateGpa(allModulesForOverall.filter(m => m.grade && m.grade !== ''));
+
       if(overallGpa !== null) {
         html += `<p class="text-sm text-gray-600">Overall GPA: ${overallGpa.toFixed(2)} (${getGpaClass(overallGpa)})</p>`;
       }
       
       html += `<ul class="list-disc list-inside ml-4 mt-2 space-y-1 text-gray-700">`;
-      academicYears.forEach(year => {
-        const yearModules = modules.filter(m => semesters.filter(s => s.academic_year_id === year.id).map(s => s.id).includes(m.semester_id) && m.grade);
-        const {gpa: yearGpa} = calculateGpa(yearModules);
+      academicData.forEach(year => {
+        let yearModules = [];
+        year.semesters.forEach(semester => yearModules.push(...semester.modules));
+        const {gpa: yearGpa} = calculateGpa(yearModules.filter(m => m.grade && m.grade !== ''));
         html += `<li>${year.year_name}${yearGpa !== null ? `: GPA ${yearGpa.toFixed(2)}` : ''}</li>`;
       });
       html += `</ul></section>`;
@@ -126,20 +117,19 @@ const CvBuilderPage = () => {
     
     if (cvData.includeSkills && cvData.skills) {
       html += `<section class="mb-6"><h2 class="text-xl font-semibold border-b-2 border-purple-500 pb-1 mb-2 text-purple-600">Skills</h2>`;
-      html += `<p class="text-gray-700 whitespace-pre-wrap">${cvData.skills}</p></section>`;
+      html += `<p class="text-gray-700 whitespace-pre-wrap">${cvData.skills.split(/[\n,]+/).map(s => s.trim()).filter(s => s).join(', ')}</p></section>`;
     }
 
     html += `</div>`;
     setGeneratedCvHtml(html);
     return html;
-  };
+  }, [profile, cvData, academicData, tasks]);
   
   useEffect(() => {
     if (!authLoading && user && !loadingData) {
       generateCvPreview();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cvData, profile, academicYears, tasks, authLoading, user, loadingData]);
+  }, [cvData, profile, academicData, tasks, authLoading, user, loadingData, generateCvPreview]);
 
 
   const handleDownloadCv = () => {

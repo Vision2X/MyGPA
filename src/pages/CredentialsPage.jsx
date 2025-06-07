@@ -10,8 +10,10 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { Loader2, PlusCircle, Trash2, Edit3, KeyRound, Eye, EyeOff, Save, BookCopy } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { supabase } from '@/lib/supabaseClient';
+import { saveToLocalStorage, loadFromLocalStorage } from '@/lib/localStorageManager';
+import { v4 as uuidv4 } from 'uuid';
 
+const CREDENTIALS_STORAGE_KEY_PREFIX = 'mygpa_credentials_';
 
 const CredentialItem = ({ cred, onEdit, onDelete, onToggleVisibility, showPassword }) => (
   <motion.div
@@ -125,27 +127,19 @@ const CredentialsPage = () => {
   const [formData, setFormData] = useState({
     service_name: '',
     username: '',
-    password_encrypted: '',
+    password_encrypted: '', // For localStorage, this will be stored as plain text.
     notes: '',
   });
 
+  const getCredsStorageKey = useCallback(() => `${CREDENTIALS_STORAGE_KEY_PREFIX}${user.id}`, [user]);
 
-  const fetchCredentials = useCallback(async () => {
+  const fetchCredentials = useCallback(() => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase
-        .from('credentials')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-    if (error) {
-        toast({ title: "Error Fetching Credentials", description: error.message, variant: "destructive" });
-    } else {
-        setCredentials(data);
-    }
+    const userCredentials = loadFromLocalStorage(getCredsStorageKey(), []);
+    setCredentials(userCredentials.sort((a,b) => new Date(b.created_at) - new Date(a.created_at)));
     setLoading(false);
-  }, [user, toast]);
+  }, [user, getCredsStorageKey]);
 
   useEffect(() => {
     fetchCredentials();
@@ -181,46 +175,46 @@ const CredentialsPage = () => {
     if (!user) return;
     setProcessing(true);
 
-    const payload = {
-        ...formData,
-        user_id: user.id,
-        updated_at: new Date().toISOString(),
-    };
+    const userCredentials = loadFromLocalStorage(getCredsStorageKey(), []);
+    const now = new Date().toISOString();
 
-    let error;
-    if (currentCredential) {
-        ({ error } = await supabase.from('credentials').update(payload).eq('id', currentCredential.id).eq('user_id', user.id));
-    } else {
-        payload.created_at = new Date().toISOString();
-        ({ error } = await supabase.from('credentials').insert(payload));
+    if (currentCredential) { // Editing
+      const credIndex = userCredentials.findIndex(c => c.id === currentCredential.id);
+      if (credIndex !== -1) {
+        userCredentials[credIndex] = {
+          ...userCredentials[credIndex],
+          ...formData,
+          updated_at: now,
+        };
+      }
+    } else { // Adding new
+      const newCredential = {
+        id: uuidv4(),
+        user_id: user.id,
+        ...formData,
+        created_at: now,
+        updated_at: now,
+      };
+      userCredentials.push(newCredential);
     }
     
-    if (error) {
-        toast({ title: `Credential ${currentCredential ? 'Update' : 'Save'} Error`, description: error.message, variant: "destructive" });
-    } else {
-        toast({ title: `Credential ${currentCredential ? 'Updated' : 'Saved'}`, description: `${formData.service_name} details saved.` });
-        fetchCredentials();
-        setIsFormOpen(false);
-        resetForm();
-    }
+    saveToLocalStorage(getCredsStorageKey(), userCredentials);
+    toast({ title: `Credential ${currentCredential ? 'Updated' : 'Saved'}`, description: `${formData.service_name} details saved.` });
+    fetchCredentials();
+    setIsFormOpen(false);
+    resetForm();
     setProcessing(false);
   };
 
   const handleDelete = async (credId) => {
     if (!user) return;
     setProcessing(true);
-    const { error } = await supabase
-        .from('credentials')
-        .delete()
-        .eq('id', credId)
-        .eq('user_id', user.id);
-
-    if (error) {
-        toast({ title: "Deletion Error", description: error.message, variant: "destructive" });
-    } else {
-        toast({ title: "Credential Deleted", description: "Credential removed successfully." });
-        fetchCredentials();
-    }
+    let userCredentials = loadFromLocalStorage(getCredsStorageKey(), []);
+    userCredentials = userCredentials.filter(c => c.id !== credId);
+    saveToLocalStorage(getCredsStorageKey(), userCredentials);
+    
+    toast({ title: "Credential Deleted", description: "Credential removed successfully." });
+    fetchCredentials();
     setProcessing(false);
   };
 
@@ -241,7 +235,7 @@ const CredentialsPage = () => {
             <BookCopy className="h-10 w-10 text-primary" />
             <div>
               <CardTitle className="text-3xl gradient-text">Credentials Manager</CardTitle>
-              <CardDescription>Store and manage your usernames and passwords securely.</CardDescription>
+              <CardDescription>Store and manage your usernames and passwords locally.</CardDescription>
             </div>
           </div>
           <Button onClick={() => openFormDialog()} className="bg-gradient-to-r from-primary to-accent hover:opacity-90">

@@ -12,8 +12,10 @@ import { useToast } from '@/components/ui/use-toast';
 import { Loader2, PlusCircle, Trash2, Edit3, ListChecks, Save, GripVertical } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
-import { supabase } from '@/lib/supabaseClient';
+import { saveToLocalStorage, loadFromLocalStorage } from '@/lib/localStorageManager';
+import { v4 as uuidv4 } from 'uuid';
 
+const TASKS_STORAGE_KEY_PREFIX = 'mygpa_tasks_'; // Formerly milestones
 const taskStatuses = ['To Do', 'In Progress', 'Done'];
 
 const TaskItem = ({ item, index, onEdit, onDelete, dragHandleProps }) => (
@@ -159,22 +161,15 @@ const TasksPage = () => {
     status: 'To Do',
   });
 
-  const fetchTasks = useCallback(async () => {
+  const getTasksStorageKey = useCallback(() => `${TASKS_STORAGE_KEY_PREFIX}${user.id}`, [user]);
+
+  const fetchTasks = useCallback(() => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase
-        .from('milestones') // Note: Supabase table is 'milestones'
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false }); // You might want to order by a custom 'order' field later
-
-    if (error) {
-        toast({ title: "Error Fetching Tasks", description: error.message, variant: "destructive" });
-    } else {
-        setTasks(data);
-    }
+    const userTasks = loadFromLocalStorage(getTasksStorageKey(), []);
+    setTasks(userTasks.sort((a,b) => new Date(b.created_at) - new Date(a.created_at))); // Or by custom order
     setLoading(false);
-  }, [user, toast]);
+  }, [user, getTasksStorageKey]);
 
   useEffect(() => {
     fetchTasks();
@@ -211,7 +206,7 @@ const TasksPage = () => {
       setFormData({
         title: task.title,
         description: task.description || '',
-        target_date: task.target_date ? task.target_date.split('T')[0] : '', // Assuming target_date is ISO string
+        target_date: task.target_date ? task.target_date.split('T')[0] : '',
         status: task.status || 'To Do',
       });
     } else {
@@ -225,49 +220,52 @@ const TasksPage = () => {
     if (!user) return;
     setProcessing(true);
 
-    const payload = {
-        ...formData,
+    const userTasks = loadFromLocalStorage(getTasksStorageKey(), []);
+    const now = new Date().toISOString();
+
+    if (currentTask) { // Editing
+      const taskIndex = userTasks.findIndex(t => t.id === currentTask.id);
+      if (taskIndex !== -1) {
+        userTasks[taskIndex] = {
+          ...userTasks[taskIndex],
+          ...formData,
+          target_date: formData.target_date || null,
+          is_completed: formData.status === 'Done',
+          completed_at: formData.status === 'Done' ? now : null,
+          updated_at: now,
+        };
+      }
+    } else { // Adding new
+      const newTask = {
+        id: uuidv4(),
         user_id: user.id,
+        ...formData,
         target_date: formData.target_date || null,
         is_completed: formData.status === 'Done',
-        completed_at: formData.status === 'Done' ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-    };
-
-    let error;
-    if (currentTask) {
-        ({ error } = await supabase.from('milestones').update(payload).eq('id', currentTask.id).eq('user_id', user.id));
-    } else {
-        payload.created_at = new Date().toISOString();
-        ({ error } = await supabase.from('milestones').insert(payload));
+        completed_at: formData.status === 'Done' ? now : null,
+        created_at: now,
+        updated_at: now,
+      };
+      userTasks.push(newTask);
     }
     
-    if (error) {
-        toast({ title: `Task ${currentTask ? 'Update' : 'Save'} Error`, description: error.message, variant: "destructive" });
-    } else {
-        toast({ title: `Task ${currentTask ? 'Updated' : 'Added'}`, description: `${formData.title} details saved.` });
-        fetchTasks();
-        setIsFormOpen(false);
-        resetForm();
-    }
+    saveToLocalStorage(getTasksStorageKey(), userTasks);
+    toast({ title: `Task ${currentTask ? 'Updated' : 'Added'}`, description: `${formData.title} details saved.` });
+    fetchTasks();
+    setIsFormOpen(false);
+    resetForm();
     setProcessing(false);
   };
 
   const handleDelete = async (taskId) => {
     if (!user) return;
     setProcessing(true);
-    const { error } = await supabase
-        .from('milestones')
-        .delete()
-        .eq('id', taskId)
-        .eq('user_id', user.id);
-
-    if (error) {
-        toast({ title: "Deletion Error", description: error.message, variant: "destructive" });
-    } else {
-        toast({ title: "Task Deleted", description: "Task removed successfully." });
-        fetchTasks();
-    }
+    let userTasks = loadFromLocalStorage(getTasksStorageKey(), []);
+    userTasks = userTasks.filter(t => t.id !== taskId);
+    saveToLocalStorage(getTasksStorageKey(), userTasks);
+    
+    toast({ title: "Task Deleted", description: "Task removed successfully." });
+    fetchTasks();
     setProcessing(false);
   };
 
@@ -277,42 +275,29 @@ const TasksPage = () => {
 
     if (source.droppableId === destination.droppableId && source.index === destination.index) return;
     
-    const taskToMove = tasks.find(t => t.id.toString() === draggableId);
-    if (!taskToMove || !user) return;
+    const userTasks = loadFromLocalStorage(getTasksStorageKey(), []);
+    const taskToMove = userTasks.find(t => t.id.toString() === draggableId);
+    if (!taskToMove) return;
     
     const newStatus = destination.droppableId;
+    const now = new Date().toISOString();
     
     const updatedTask = {
       ...taskToMove,
       status: newStatus,
       is_completed: newStatus === 'Done',
-      completed_at: newStatus === 'Done' ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
+      completed_at: newStatus === 'Done' ? now : null,
+      updated_at: now,
     };
 
-    // Optimistic UI Update
-    const oldTasks = [...tasks];
-    const updatedTasks = tasks.map(t => t.id === taskToMove.id ? updatedTask : t);
-    setTasks(updatedTasks);
-
-
-    const { error } = await supabase
-      .from('milestones')
-      .update({ 
-        status: newStatus, 
-        is_completed: updatedTask.is_completed,
-        completed_at: updatedTask.completed_at,
-        updated_at: updatedTask.updated_at
-      })
-      .eq('id', taskToMove.id)
-      .eq('user_id', user.id);
-    
-    if (error) {
-      toast({ title: "Task Move Error", description: error.message, variant: "destructive" });
-      setTasks(oldTasks); // Revert optimistic update on error
-    } else {
+    const taskIndex = userTasks.findIndex(t => t.id === taskToMove.id);
+    if (taskIndex !== -1) {
+      userTasks[taskIndex] = updatedTask;
+      saveToLocalStorage(getTasksStorageKey(), userTasks);
       toast({ title: "Task Moved", description: `Task "${taskToMove.title}" moved to ${newStatus}.` });
-      // No need to call fetchTasks if optimistic update is final
+      fetchTasks(); // Refresh UI from localStorage
+    } else {
+      toast({ title: "Task Move Error", description: "Could not find task to move.", variant: "destructive" });
     }
   };
 

@@ -1,165 +1,334 @@
-import React, { createContext, useState, useEffect, useCallback } from 'react';
-import { supabase } from '@/lib/supabaseClient';
-import { useToast } from '@/components/ui/use-toast';
+import React, { createContext, useState, useEffect, useCallback } from "react";
+import { useToast } from "@/components/ui/use-toast";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+  sendPasswordResetEmail,
+} from "firebase/auth";
+import { auth } from "@/lib/firebase";
+import {
+  saveToLocalStorage,
+  loadFromLocalStorage,
+  removeFromLocalStorage,
+} from "@/lib/localStorageManager";
 
 const AuthContext = createContext(null);
+const PROFILES_STORAGE_KEY = "mygpa_profiles";
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
 
-  const fetchUserProfile = useCallback(async (userId) => {
-    if (!userId) return null;
-    try {
-      const { data: profile, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
-      if (error && error.code !== 'PGRST116') {
-        console.error('Error fetching profile:', error);
-        return null;
-      }
-      return profile;
-    } catch (e) {
-      console.error('Exception fetching profile:', e);
-      return null;
+  const fetchUserProfile = useCallback((userId) => {
+    const profiles = loadFromLocalStorage(PROFILES_STORAGE_KEY, []);
+    return profiles.find((p) => p.id === userId) || null;
+  }, []);
+
+  const createUserProfile = useCallback((firebaseUser, additionalData = {}) => {
+    const profiles = loadFromLocalStorage(PROFILES_STORAGE_KEY, []);
+
+    const newProfile = {
+      id: firebaseUser.uid,
+      name: additionalData.name || firebaseUser.displayName || "",
+      email: firebaseUser.email,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      avatar_url: firebaseUser.photoURL || "",
+      university_name: "",
+      degree_program: "",
+      student_id_number: "",
+      linkedin_url: "",
+      portfolio_url: "",
+      ...additionalData,
+    };
+
+    profiles.push(newProfile);
+    saveToLocalStorage(PROFILES_STORAGE_KEY, profiles);
+    return newProfile;
+  }, []);
+
+  const updateUserProfile = useCallback((userId, profileData) => {
+    const profiles = loadFromLocalStorage(PROFILES_STORAGE_KEY, []);
+    const profileIndex = profiles.findIndex((p) => p.id === userId);
+
+    if (profileIndex !== -1) {
+      profiles[profileIndex] = {
+        ...profiles[profileIndex],
+        ...profileData,
+        updated_at: new Date().toISOString(),
+      };
+      saveToLocalStorage(PROFILES_STORAGE_KEY, profiles);
+      return profiles[profileIndex];
     }
+    return null;
   }, []);
 
   useEffect(() => {
-    let isMounted = true;
-    const getSession = async () => {
-      setLoading(true);
-      const { data: { session }, error } = await supabase.auth.getSession();
-      
-      if (!isMounted) return;
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // User is signed in
+        let profile = fetchUserProfile(firebaseUser.uid);
 
-      if (error) {
-        console.error("Error getting session:", error.message);
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-
-      if (session?.user) {
-        const profile = await fetchUserProfile(session.user.id);
-        if (isMounted) setUser({ ...session.user, ...profile });
-      } else {
-        if (isMounted) setUser(null);
-      }
-      if (isMounted) setLoading(false);
-    };
-
-    getSession();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!isMounted) return;
-      setLoading(true);
-      if (session?.user) {
-        const profile = await fetchUserProfile(session.user.id);
-        if (isMounted) setUser({ ...session.user, ...profile });
-      } else {
-        if (isMounted) setUser(null);
-      }
-      if (isMounted) setLoading(false);
-    });
-
-    return () => {
-      isMounted = false;
-      authListener?.subscription.unsubscribe();
-    };
-  }, [fetchUserProfile]);
-
-  const login = useCallback(async (email, password) => {
-    setLoading(true);
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      toast({ title: "Login Failed", description: error.message, variant: "destructive" });
-      setLoading(false);
-      throw error;
-    }
-    if (data.user) {
-      const profile = await fetchUserProfile(data.user.id);
-      setUser({ ...data.user, ...profile });
-      toast({ title: "Login Successful!", description: `Welcome back, ${profile?.name || data.user.email}!`, variant: "default" });
-    }
-    setLoading(false);
-    return data;
-  }, [toast, fetchUserProfile]);
-
-  const signup = useCallback(async (name, email, password) => {
-    setLoading(true);
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          name: name,
+        if (!profile) {
+          // Create profile if it doesn't exist
+          profile = createUserProfile(firebaseUser);
+        } else {
+          // Update profile with latest Firebase data
+          profile = updateUserProfile(firebaseUser.uid, {
+            email: firebaseUser.email,
+            avatar_url: firebaseUser.photoURL || profile.avatar_url,
+          });
         }
+
+        setUser(profile);
+      } else {
+        // User is signed out
+        setUser(null);
       }
+      setLoading(false);
     });
 
-    if (error) {
-      toast({ title: "Signup Failed", description: error.message, variant: "destructive" });
-      setLoading(false);
-      throw error;
-    }
+    return () => unsubscribe();
+  }, [fetchUserProfile, createUserProfile, updateUserProfile]);
 
-    if (data.user) {
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .insert([
-          { id: data.user.id, name, email, updated_at: new Date(), created_at: new Date() }
-        ]);
+  const login = useCallback(
+    async (email, password) => {
+      try {
+        setLoading(true);
+        const userCredential = await signInWithEmailAndPassword(
+          auth,
+          email,
+          password
+        );
+        const firebaseUser = userCredential.user;
 
-      if (profileError) {
-        toast({ title: "Profile Creation Failed", description: profileError.message, variant: "destructive" });
+        let profile = fetchUserProfile(firebaseUser.uid);
+        if (!profile) {
+          profile = createUserProfile(firebaseUser);
+        }
+
+        toast({
+          title: "Login Successful!",
+          description: `Welcome back, ${profile.name || profile.email}!`,
+          variant: "default",
+        });
+
+        return profile;
+      } catch (error) {
+        let errorMessage = "Login failed. Please try again.";
+
+        switch (error.code) {
+          case "auth/user-not-found":
+            errorMessage = "No account found with this email.";
+            break;
+          case "auth/wrong-password":
+            errorMessage = "Incorrect password.";
+            break;
+          case "auth/invalid-email":
+            errorMessage = "Invalid email address.";
+            break;
+          case "auth/user-disabled":
+            errorMessage = "This account has been disabled.";
+            break;
+          case "auth/too-many-requests":
+            errorMessage = "Too many failed attempts. Please try again later.";
+            break;
+          default:
+            errorMessage = error.message;
+        }
+
+        toast({
+          title: "Login Failed",
+          description: errorMessage,
+          variant: "destructive",
+        });
+
+        throw new Error(errorMessage);
+      } finally {
         setLoading(false);
-        throw profileError;
       }
-      setUser({ ...data.user, name, email }); 
-      toast({ title: "Signup Successful!", description: `Welcome, ${name}! Please check your email to verify your account.`, variant: "default" });
-    }
-    setLoading(false);
-    return data;
-  }, [toast]);
+    },
+    [toast, fetchUserProfile, createUserProfile]
+  );
+
+  const signup = useCallback(
+    async (name, email, password) => {
+      try {
+        setLoading(true);
+        const userCredential = await createUserWithEmailAndPassword(
+          auth,
+          email,
+          password
+        );
+        const firebaseUser = userCredential.user;
+
+        // Update the user's display name
+        await updateProfile(firebaseUser, {
+          displayName: name,
+        });
+
+        // Create user profile
+        const profile = createUserProfile(firebaseUser, { name });
+
+        toast({
+          title: "Signup Successful!",
+          description: `Welcome, ${name}! Your account has been created.`,
+          variant: "default",
+        });
+
+        return profile;
+      } catch (error) {
+        let errorMessage = "Signup failed. Please try again.";
+
+        switch (error.code) {
+          case "auth/email-already-in-use":
+            errorMessage = "An account with this email already exists.";
+            break;
+          case "auth/invalid-email":
+            errorMessage = "Invalid email address.";
+            break;
+          case "auth/operation-not-allowed":
+            errorMessage = "Email/password accounts are not enabled.";
+            break;
+          case "auth/weak-password":
+            errorMessage =
+              "Password is too weak. Please choose a stronger password.";
+            break;
+          default:
+            errorMessage = error.message;
+        }
+
+        toast({
+          title: "Signup Failed",
+          description: errorMessage,
+          variant: "destructive",
+        });
+
+        throw new Error(errorMessage);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [toast, createUserProfile]
+  );
 
   const logout = useCallback(async () => {
-    setLoading(true);
-    const { error } = await supabase.auth.signOut();
-    if (error) {
-      toast({ title: "Logout Failed", description: error.message, variant: "destructive" });
-    } else {
+    try {
+      setLoading(true);
+      await signOut(auth);
       setUser(null);
-      toast({ title: "Logged Out", description: "You have been successfully logged out.", variant: "default" });
-    }
-    setLoading(false);
-  }, [toast]);
-  
-  const updateUserProfileContext = useCallback(async (updatedProfileData) => {
-    if (!user) return;
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('profiles')
-      .update({ ...updatedProfileData, updated_at: new Date().toISOString() })
-      .eq('id', user.id)
-      .select()
-      .single();
 
-    if (error) {
-      toast({ title: "Profile Update Failed", description: error.message, variant: "destructive" });
+      toast({
+        title: "Logged Out",
+        description: "You have been successfully logged out.",
+        variant: "default",
+      });
+    } catch (error) {
+      toast({
+        title: "Logout Error",
+        description: "Failed to log out. Please try again.",
+        variant: "destructive",
+      });
+      throw new Error(error.message);
+    } finally {
       setLoading(false);
-      throw error;
     }
-    if (data) {
-      setUser(prevUser => ({ ...prevUser, ...data }));
-      toast({ title: "Profile Updated", description: "Your profile has been updated." });
-    }
-    setLoading(false);
-    return data;
-  }, [user, toast]);
+  }, [toast]);
+
+  const resetPassword = useCallback(
+    async (email) => {
+      try {
+        await sendPasswordResetEmail(auth, email);
+        toast({
+          title: "Password Reset Email Sent",
+          description: "Check your email for password reset instructions.",
+          variant: "default",
+        });
+      } catch (error) {
+        let errorMessage = "Failed to send password reset email.";
+
+        switch (error.code) {
+          case "auth/user-not-found":
+            errorMessage = "No account found with this email address.";
+            break;
+          case "auth/invalid-email":
+            errorMessage = "Invalid email address.";
+            break;
+          default:
+            errorMessage = error.message;
+        }
+
+        toast({
+          title: "Password Reset Failed",
+          description: errorMessage,
+          variant: "destructive",
+        });
+
+        throw new Error(errorMessage);
+      }
+    },
+    [toast]
+  );
+
+  const updateUserProfileContext = useCallback(
+    async (updatedProfileData) => {
+      if (!user) throw new Error("User not authenticated");
+
+      try {
+        setLoading(true);
+        let profiles = loadFromLocalStorage(PROFILES_STORAGE_KEY, []);
+        const profileIndex = profiles.findIndex((p) => p.id === user.id);
+
+        if (profileIndex === -1) {
+          toast({
+            title: "Profile Update Failed",
+            description: "Profile not found.",
+            variant: "destructive",
+          });
+          setLoading(false);
+          throw new Error("Profile not found.");
+        }
+
+        const updatedProfile = {
+          ...profiles[profileIndex],
+          ...updatedProfileData,
+          updated_at: new Date().toISOString(),
+        };
+
+        profiles[profileIndex] = updatedProfile;
+        saveToLocalStorage(PROFILES_STORAGE_KEY, profiles);
+        setUser(updatedProfile);
+
+        // Update Firebase profile if name is being changed
+        if (updatedProfileData.name && auth.currentUser) {
+          await updateProfile(auth.currentUser, {
+            displayName: updatedProfileData.name,
+          });
+        }
+
+        toast({
+          title: "Profile Updated",
+          description: "Your profile has been updated.",
+        });
+
+        return updatedProfile;
+      } catch (error) {
+        toast({
+          title: "Profile Update Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+        throw error;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [user, toast]
+  );
 
   const value = {
     user,
@@ -167,6 +336,7 @@ export const AuthProvider = ({ children }) => {
     login,
     signup,
     logout,
+    resetPassword,
     isAuthenticated: !!user,
     updateUserProfileContext,
     fetchUserProfile,

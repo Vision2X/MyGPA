@@ -8,9 +8,9 @@ import { useToast } from '@/components/ui/use-toast';
 import { Loader2, UserCircle, Save, UploadCloud } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { supabase } from '@/lib/supabaseClient';
+import { saveToLocalStorage, loadFromLocalStorage } from '@/lib/localStorageManager';
 
-const AVATARS_BUCKET = 'avatars';
+const AVATARS_STORAGE_KEY_PREFIX = 'mygpa_avatar_'; // Prefix for individual avatar files
 
 const ProfilePage = () => {
   const { user, loading: authLoading, updateUserProfileContext, fetchUserProfile } = useAuth();
@@ -23,14 +23,15 @@ const ProfilePage = () => {
     student_id_number: '',
     linkedin_url: '',
     portfolio_url: '',
-    avatar_url: '',
+    avatar_url: '', // This will store a data URL for localStorage
   });
   const [pageLoading, setPageLoading] = useState(false);
-  const [avatarFile, setAvatarFile] = useState(null);
-  const [avatarPreview, setAvatarPreview] = useState(null);
+  const [avatarFile, setAvatarFile] = useState(null); // This will hold the File object
+  const [avatarPreview, setAvatarPreview] = useState(null); // This will hold the data URL for preview
 
   useEffect(() => {
     if (user) {
+      const storedAvatarDataUrl = loadFromLocalStorage(`${AVATARS_STORAGE_KEY_PREFIX}${user.id}`);
       setProfileData({
         name: user.name || '',
         email: user.email || '',
@@ -39,10 +40,10 @@ const ProfilePage = () => {
         student_id_number: user.student_id_number || '',
         linkedin_url: user.linkedin_url || '',
         portfolio_url: user.portfolio_url || '',
-        avatar_url: user.avatar_url || '',
+        avatar_url: storedAvatarDataUrl || user.avatar_url || '', // Prioritize localStorage avatar
       });
-      if (user.avatar_url) {
-        setAvatarPreview(user.avatar_url);
+      if (storedAvatarDataUrl || user.avatar_url) {
+        setAvatarPreview(storedAvatarDataUrl || user.avatar_url);
       }
     }
   }, [user]);
@@ -55,15 +56,16 @@ const ProfilePage = () => {
   const handleAvatarChange = (e) => {
     const file = e.target.files[0];
     if (file && file.type.startsWith('image/')) {
-      setAvatarFile(file);
+      setAvatarFile(file); // Store the file object
       const reader = new FileReader();
       reader.onloadend = () => {
-        setAvatarPreview(reader.result); 
+        setAvatarPreview(reader.result); // Set preview (data URL)
       };
       reader.readAsDataURL(file);
     } else {
       setAvatarFile(null);
-      setAvatarPreview(user?.avatar_url || null);
+      const storedAvatarDataUrl = user ? loadFromLocalStorage(`${AVATARS_STORAGE_KEY_PREFIX}${user.id}`) : null;
+      setAvatarPreview(storedAvatarDataUrl || user?.avatar_url || null);
       if (file) toast({ title: "Invalid File", description: "Please select an image file.", variant: "destructive"});
     }
   };
@@ -73,46 +75,48 @@ const ProfilePage = () => {
     if (!user) return;
     setPageLoading(true);
     
-    let newAvatarUrl = profileData.avatar_url;
+    let newAvatarDataUrl = profileData.avatar_url;
 
-    if (avatarFile) {
-      const fileName = `${user.id}/${Date.now()}_${avatarFile.name}`;
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from(AVATARS_BUCKET)
-        .upload(fileName, avatarFile, {
-          cacheControl: '3600',
-          upsert: true,
-        });
+    if (avatarFile) { // If a new file was selected
+      const reader = new FileReader();
+      reader.readAsDataURL(avatarFile);
+      reader.onload = async () => {
+        newAvatarDataUrl = reader.result; // This is the data URL
+        saveToLocalStorage(`${AVATARS_STORAGE_KEY_PREFIX}${user.id}`, newAvatarDataUrl); // Save data URL to localStorage
 
-      if (uploadError) {
-        toast({ title: "Avatar Upload Error", description: uploadError.message, variant: "destructive" });
+        const updatedProfileFields = {
+          ...profileData,
+          avatar_url: newAvatarDataUrl, // Store data URL in profile for context
+        };
+        delete updatedProfileFields.email; // Don't try to update email
+
+        try {
+          await updateUserProfileContext(updatedProfileFields);
+          // No need to call fetchUserProfile as context is updated directly
+          toast({ title: "Profile Updated", description: "Your profile information has been saved successfully." });
+        } catch (error) {
+          toast({ title: "Profile Update Error", description: error.message || "Could not update profile.", variant: "destructive" });
+        } finally {
+          setPageLoading(false);
+          setAvatarFile(null); 
+        }
+      };
+      reader.onerror = () => {
+        toast({ title: "Avatar Read Error", description: "Could not read the avatar file.", variant: "destructive" });
         setPageLoading(false);
-        return;
       }
-      
-      const { data: urlData } = supabase.storage.from(AVATARS_BUCKET).getPublicUrl(uploadData.path);
-      newAvatarUrl = urlData.publicUrl;
-    }
-    
-    const updatedProfileFields = {
-        name: profileData.name,
-        university_name: profileData.university_name,
-        degree_program: profileData.degree_program,
-        student_id_number: profileData.student_id_number,
-        linkedin_url: profileData.linkedin_url,
-        portfolio_url: profileData.portfolio_url,
-        avatar_url: newAvatarUrl,
-    };
+    } else { // No new file, just update other fields
+        const updatedProfileFields = { ...profileData };
+        delete updatedProfileFields.email;
 
-    try {
-      await updateUserProfileContext(updatedProfileFields);
-      await fetchUserProfile(user.id); // Re-fetch to ensure context is up-to-date
-      toast({ title: "Profile Updated", description: "Your profile information has been saved successfully." });
-    } catch (error) {
-      toast({ title: "Profile Update Error", description: error.message || "Could not update profile.", variant: "destructive" });
-    } finally {
-      setPageLoading(false);
-      setAvatarFile(null); 
+        try {
+          await updateUserProfileContext(updatedProfileFields);
+          toast({ title: "Profile Updated", description: "Your profile information has been saved successfully." });
+        } catch (error) {
+          toast({ title: "Profile Update Error", description: error.message || "Could not update profile.", variant: "destructive" });
+        } finally {
+          setPageLoading(false);
+        }
     }
   };
 
@@ -136,9 +140,9 @@ const ProfilePage = () => {
           <div className="flex flex-col items-center sm:flex-row sm:items-start space-y-4 sm:space-y-0 sm:space-x-6 mb-4">
             <div className="relative group">
               <Avatar className="w-24 h-24 sm:w-32 sm:h-32 border-4 border-primary shadow-lg">
-                <AvatarImage src={avatarPreview || user.avatar_url} alt={user.name || user.email} />
+                <AvatarImage src={avatarPreview} alt={profileData.name || profileData.email} />
                 <AvatarFallback className="text-4xl bg-accent/20">
-                  {user.name ? user.name.charAt(0).toUpperCase() : <UserCircle />}
+                  {profileData.name ? profileData.name.charAt(0).toUpperCase() : <UserCircle />}
                 </AvatarFallback>
               </Avatar>
               <label htmlFor="avatarUpload" className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover:opacity-100 rounded-full cursor-pointer transition-opacity">

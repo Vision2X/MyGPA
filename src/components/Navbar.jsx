@@ -1,13 +1,16 @@
+
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
-import { LogIn, LogOut, LayoutDashboard, GraduationCap, UserCircle as UserIconLucide } from 'lucide-react';
+import { useTheme } from '@/contexts/ThemeContext';
+import { LogIn, LogOut, LayoutDashboard, GraduationCap, UserCircle as UserIconLucide, Sun, Moon } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 const Navbar = () => {
   const { user, logout, isAuthenticated } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -20,7 +23,7 @@ const Navbar = () => {
       initial={{ y: -100, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ duration: 0.5, ease: "easeOut" }}
-      className="bg-background/80 backdrop-blur-md shadow-md sticky top-0 z-50 py-3 px-4 sm:px-6 lg:px-8"
+      className="bg-background/80 dark:bg-slate-900/80 backdrop-blur-md shadow-md sticky top-0 z-50 py-3 px-4 sm:px-6 lg:px-8"
     >
       <div className="container mx-auto flex items-center justify-between">
         <Link to="/" className="flex items-center space-x-2">
@@ -28,6 +31,9 @@ const Navbar = () => {
           <span className="text-2xl font-bold gradient-text">MyGPA</span>
         </Link>
         <div className="flex items-center space-x-3">
+          <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
+            {theme === 'dark' ? <Sun className="h-5 w-5 text-yellow-400" /> : <Moon className="h-5 w-5 text-primary" />}
+          </Button>
           {isAuthenticated ? (
             <>
               <Button variant="ghost" size="sm" asChild>

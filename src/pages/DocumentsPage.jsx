@@ -9,9 +9,11 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { Loader2, Upload, Trash2, FileText, Download, Edit3, FolderKanban, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { supabase } from '@/lib/supabaseClient';
+import { saveToLocalStorage, loadFromLocalStorage, removeFromLocalStorage } from '@/lib/localStorageManager';
+import { v4 as uuidv4 } from 'uuid';
 
-const DOCUMENTS_BUCKET = 'user-documents';
+const DOCUMENTS_STORAGE_KEY_PREFIX = 'mygpa_documents_'; // For metadata list per user
+const DOCUMENT_CONTENT_STORAGE_KEY_PREFIX = 'mygpa_doc_content_'; // For actual file content (Data URL)
 
 const formatFileSize = (bytes) => {
   if (bytes === 0) return '0 Bytes';
@@ -54,7 +56,7 @@ const DocumentItem = ({ doc, onEdit, onDelete, onDownload }) => (
                     <AlertDialogCancel>Cancel</AlertDialogCancel>
                     <AlertDialogAction
                     className="bg-destructive hover:bg-destructive/90"
-                    onClick={() => onDelete(doc.id, doc.storage_path)}
+                    onClick={() => onDelete(doc.id)}
                     >
                     Delete
                     </AlertDialogAction>
@@ -139,28 +141,21 @@ const DocumentsPage = () => {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [fileToUpload, setFileToUpload] = useState(null);
-  const [fileName, setFileName] = useState('');
+  const [fileToUpload, setFileToUpload] = useState(null); // File object
+  const [fileName, setFileName] = useState(''); // For custom naming
   const [editingDoc, setEditingDoc] = useState(null);
   const [isUploadDialogOpen, setIsUploadDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
 
-  const fetchDocuments = useCallback(async () => {
+  const getDocsStorageKey = useCallback(() => `${DOCUMENTS_STORAGE_KEY_PREFIX}${user.id}`, [user]);
+
+  const fetchDocuments = useCallback(() => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      toast({ title: "Error Fetching Documents", description: error.message, variant: "destructive" });
-    } else {
-      setDocuments(data);
-    }
+    const userDocuments = loadFromLocalStorage(getDocsStorageKey(), []);
+    setDocuments(userDocuments.sort((a,b) => new Date(b.created_at) - new Date(a.created_at)));
     setLoading(false);
-  }, [user, toast]);
+  }, [user, getDocsStorageKey]);
 
   useEffect(() => {
     fetchDocuments();
@@ -170,7 +165,7 @@ const DocumentsPage = () => {
     const file = event.target.files[0];
     if (file) {
       setFileToUpload(file);
-      setFileName(file.name); // Default to file's name
+      setFileName(file.name); 
     }
   };
 
@@ -178,93 +173,71 @@ const DocumentsPage = () => {
     if (!fileToUpload || !user) return;
     setUploading(true);
 
-    const actualFileName = fileName || fileToUpload.name;
-    const filePath = `${user.id}/${Date.now()}_${actualFileName}`;
+    const reader = new FileReader();
+    reader.readAsDataURL(fileToUpload);
+    reader.onload = () => {
+      const fileDataUrl = reader.result;
+      const actualFileName = fileName || fileToUpload.name;
+      const docId = uuidv4();
 
-    const { error: uploadError } = await supabase.storage
-      .from(DOCUMENTS_BUCKET)
-      .upload(filePath, fileToUpload);
-
-    if (uploadError) {
-      toast({ title: "Upload Error", description: uploadError.message, variant: "destructive" });
-      setUploading(false);
-      return;
-    }
-
-    const { data: publicURLData } = supabase.storage.from(DOCUMENTS_BUCKET).getPublicUrl(filePath);
-    
-    const { error: dbError } = await supabase
-      .from('documents')
-      .insert({
+      const newDocumentMeta = {
+        id: docId,
         user_id: user.id,
         file_name: actualFileName,
         file_type: fileToUpload.type,
         file_size: fileToUpload.size,
-        storage_path: filePath,
-        // public_url: publicURLData.publicUrl, // You can store this if needed
-      });
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
 
-    if (dbError) {
-      toast({ title: "Database Error", description: dbError.message, variant: "destructive" });
-      // Optionally, delete the uploaded file from storage if DB insert fails
-      await supabase.storage.from(DOCUMENTS_BUCKET).remove([filePath]);
-    } else {
+      // Save metadata
+      const userDocuments = loadFromLocalStorage(getDocsStorageKey(), []);
+      userDocuments.push(newDocumentMeta);
+      saveToLocalStorage(getDocsStorageKey(), userDocuments);
+
+      // Save content (Data URL)
+      saveToLocalStorage(`${DOCUMENT_CONTENT_STORAGE_KEY_PREFIX}${docId}`, fileDataUrl);
+      
       toast({ title: "File Uploaded", description: `${actualFileName} uploaded successfully.` });
-      fetchDocuments(); // Refresh the list
-    }
-    setUploading(false);
-    setFileToUpload(null);
-    setFileName('');
-    setIsUploadDialogOpen(false);
+      fetchDocuments();
+      setUploading(false);
+      setFileToUpload(null);
+      setFileName('');
+      setIsUploadDialogOpen(false);
+    };
+    reader.onerror = () => {
+      toast({ title: "Upload Error", description: "Could not read file for upload.", variant: "destructive" });
+      setUploading(false);
+    };
   };
   
   const handleDownload = async (doc) => {
-    const { data, error } = await supabase.storage
-      .from(DOCUMENTS_BUCKET)
-      .download(doc.storage_path);
-
-    if (error) {
-      toast({ title: "Download Error", description: error.message, variant: "destructive" });
+    const fileDataUrl = loadFromLocalStorage(`${DOCUMENT_CONTENT_STORAGE_KEY_PREFIX}${doc.id}`);
+    if (!fileDataUrl) {
+      toast({ title: "Download Error", description: "File content not found.", variant: "destructive" });
       return;
     }
     
-    const blob = new Blob([data], { type: doc.file_type });
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
+    link.href = fileDataUrl;
     link.download = doc.file_name;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
     toast({ title: "Download Started", description: `Downloading ${doc.file_name}.` });
   };
 
-  const handleDelete = async (docId, storagePath) => {
+  const handleDelete = async (docId) => {
     if (!user) return;
     setProcessing(true);
 
-    const { error: storageError } = await supabase.storage
-      .from(DOCUMENTS_BUCKET)
-      .remove([storagePath]);
-
-    if (storageError) {
-      toast({ title: "Storage Deletion Error", description: storageError.message, variant: "destructive" });
-      setProcessing(false);
-      return;
-    }
-
-    const { error: dbError } = await supabase
-      .from('documents')
-      .delete()
-      .eq('id', docId)
-      .eq('user_id', user.id);
-
-    if (dbError) {
-      toast({ title: "Database Deletion Error", description: dbError.message, variant: "destructive" });
-    } else {
-      toast({ title: "Document Deleted", description: "Document removed successfully." });
-      fetchDocuments();
-    }
+    let userDocuments = loadFromLocalStorage(getDocsStorageKey(), []);
+    userDocuments = userDocuments.filter(d => d.id !== docId);
+    saveToLocalStorage(getDocsStorageKey(), userDocuments);
+    removeFromLocalStorage(`${DOCUMENT_CONTENT_STORAGE_KEY_PREFIX}${docId}`);
+    
+    toast({ title: "Document Deleted", description: "Document removed successfully." });
+    fetchDocuments();
     setProcessing(false);
   };
   
@@ -278,18 +251,18 @@ const DocumentsPage = () => {
     if (!editingDoc || !fileName || !user) return;
     setProcessing(true);
 
-    const { error } = await supabase
-      .from('documents')
-      .update({ file_name: fileName, updated_at: new Date().toISOString() })
-      .eq('id', editingDoc.id)
-      .eq('user_id', user.id);
-
-    if (error) {
-      toast({ title: "Rename Error", description: error.message, variant: "destructive" });
-    } else {
+    let userDocuments = loadFromLocalStorage(getDocsStorageKey(), []);
+    const docIndex = userDocuments.findIndex(d => d.id === editingDoc.id);
+    if (docIndex !== -1) {
+      userDocuments[docIndex].file_name = fileName;
+      userDocuments[docIndex].updated_at = new Date().toISOString();
+      saveToLocalStorage(getDocsStorageKey(), userDocuments);
       toast({ title: "File Renamed", description: "File name updated successfully." });
       fetchDocuments();
+    } else {
+      toast({ title: "Rename Error", description: "Document not found.", variant: "destructive" });
     }
+    
     setProcessing(false);
     setIsEditDialogOpen(false);
     setEditingDoc(null);
@@ -308,7 +281,7 @@ const DocumentsPage = () => {
             <FolderKanban className="h-10 w-10 text-primary" />
             <div>
               <CardTitle className="text-3xl gradient-text">My Documents</CardTitle>
-              <CardDescription>Upload, manage, and access your important files.</CardDescription>
+              <CardDescription>Upload, manage, and access your important files locally.</CardDescription>
             </div>
           </div>
           <UploadDocumentForm 

@@ -4,21 +4,129 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger, AlertDialogFooter } from '@/components/ui/alert-dialog';
 import { useToast } from '@/components/ui/use-toast';
-import { BarChart3, PlusCircle, Trash2, Edit3, Save, Loader2, BookOpen, CalendarDays, AlertCircle as CalculatorIcon, Trophy } from 'lucide-react';
+import { BarChart3, PlusCircle, Trash2, Edit3, Save, Loader2, BookOpen, CalendarDays, Trophy } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { supabase } from '@/lib/supabaseClient';
 import { gradePointMapSL, getGpaClass, calculateGpa } from '@/components/gpa-calculator/gpaUtils';
 import { v4 as uuidv4 } from 'uuid';
+import { saveToLocalStorage, loadFromLocalStorage } from '@/lib/localStorageManager';
+
+const GPA_DATA_STORAGE_KEY_PREFIX = 'mygpa_gpa_data_';
+
+// Helper component for Academic Year
+const AcademicYearCard = ({ year, gpaByYear, onEditYear, onDeleteYear, onAddSemester, onEditSemester, onDeleteSemester, onAddModule, onEditModule, onDeleteModule, gpaBySemester }) => (
+  <Card className="bg-card/80 shadow-md">
+    <CardHeader className="flex flex-row justify-between items-center p-4">
+      <div className="flex items-center space-x-2">
+        <CalendarDays className="h-6 w-6 text-primary" />
+        <CardTitle className="text-xl">{year.year_name}</CardTitle>
+      </div>
+      <div className="flex items-center space-x-2">
+        {gpaByYear[year.id]?.gpa !== null && gpaByYear[year.id]?.gpa !== undefined && (
+          <span className="text-sm font-semibold text-primary">
+            Year GPA: {gpaByYear[year.id].gpa.toFixed(2)} (Credits: {gpaByYear[year.id].credits || 0})
+          </span>
+        )}
+        <Button variant="ghost" size="icon" onClick={() => onEditYear(year)}><Edit3 className="h-4 w-4" /></Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button></AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader><AlertDialogTitle>Delete {year.year_name}?</AlertDialogTitle><AlertDialogDescription>This will delete the year and all its semesters and modules. This action cannot be undone.</AlertDialogDescription></AlertDialogHeader>
+            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={() => onDeleteYear(year.id)}>Delete</AlertDialogAction></AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <Button size="sm" variant="outline" onClick={() => onAddSemester(year.id)}><PlusCircle className="mr-2 h-4 w-4" /> Add Semester</Button>
+      </div>
+    </CardHeader>
+    <CardContent className="p-4 space-y-3">
+      {year.semesters.length === 0 && <p className="text-sm text-muted-foreground pl-2">No semesters in this year. Add one!</p>}
+      {year.semesters.map(semester => (
+        <SemesterCard 
+          key={semester.id} 
+          semester={semester} 
+          yearId={year.id}
+          gpaBySemester={gpaBySemester}
+          onEditSemester={onEditSemester} 
+          onDeleteSemester={onDeleteSemester} 
+          onAddModule={onAddModule}
+          onEditModule={onEditModule}
+          onDeleteModule={onDeleteModule}
+        />
+      ))}
+    </CardContent>
+  </Card>
+);
+
+// Helper component for Semester
+const SemesterCard = ({ semester, yearId, gpaBySemester, onEditSemester, onDeleteSemester, onAddModule, onEditModule, onDeleteModule }) => (
+  <Card className="bg-background/70">
+    <CardHeader className="flex flex-row justify-between items-center p-3">
+      <div className="flex items-center space-x-2">
+        <BookOpen className="h-5 w-5 text-accent" />
+        <CardTitle className="text-lg">{semester.semester_name}</CardTitle>
+      </div>
+      <div className="flex items-center space-x-2">
+        {gpaBySemester[semester.id]?.gpa !== null && gpaBySemester[semester.id]?.gpa !== undefined && (
+          <span className="text-xs font-semibold text-accent">
+            Sem GPA: {gpaBySemester[semester.id].gpa.toFixed(2)} (Credits: {gpaBySemester[semester.id].credits || 0})
+          </span>
+        )}
+        <Button variant="ghost" size="icon" onClick={() => onEditSemester(yearId, semester)}><Edit3 className="h-4 w-4" /></Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button></AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader><AlertDialogTitle>Delete {semester.semester_name}?</AlertDialogTitle><AlertDialogDescription>This will delete the semester and all its modules. This action cannot be undone.</AlertDialogDescription></AlertDialogHeader>
+            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={() => onDeleteSemester(semester.id)}>Delete</AlertDialogAction></AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <Button size="xs" variant="outline" onClick={() => onAddModule(semester.id)}><PlusCircle className="mr-1 h-3 w-3" /> Add Module</Button>
+      </div>
+    </CardHeader>
+    <CardContent className="p-3 space-y-2">
+      {semester.modules.length === 0 && <p className="text-xs text-muted-foreground pl-2">No modules in this semester. Add some!</p>}
+      {semester.modules.map(module => (
+        <ModuleItem 
+          key={module.id} 
+          moduleItem={module} 
+          semesterId={semester.id} 
+          onEditModule={onEditModule} 
+          onDeleteModule={onDeleteModule}
+        />
+      ))}
+    </CardContent>
+  </Card>
+);
+
+// Helper component for Module
+const ModuleItem = ({ moduleItem, semesterId, onEditModule, onDeleteModule }) => (
+  <Card className="bg-background/50">
+    <CardContent className="p-2 flex justify-between items-center">
+      <div>
+        <p className="font-medium text-sm">{moduleItem.module_code} - {moduleItem.module_name}</p>
+        <p className="text-xs text-muted-foreground">Credits: {moduleItem.credits} | Grade: {moduleItem.grade || 'N/A'} (Points: {moduleItem.grade_points !== null ? parseFloat(moduleItem.grade_points).toFixed(2) : 'N/A'})</p>
+      </div>
+      <div className="flex items-center space-x-1">
+        <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => onEditModule(semesterId, moduleItem)}><Edit3 className="h-3 w-3" /></Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive"><Trash2 className="h-3 w-3" /></Button></AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader><AlertDialogTitle>Delete {moduleItem.module_name}?</AlertDialogTitle><AlertDialogDescription>This action cannot be undone.</AlertDialogDescription></AlertDialogHeader>
+            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={() => onDeleteModule(moduleItem.id)}>Delete</AlertDialogAction></AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </CardContent>
+  </Card>
+);
 
 
 const GpaCalculatorPage = () => {
   const { user } = useAuth();
   const { toast } = useToast();
 
-  const [academicData, setAcademicData] = useState([]); // Stores [{ id, yearName, semesters: [{ id, semesterName, modules: [...]}]}]
+  const [academicData, setAcademicData] = useState([]);
   const [overallGPA, setOverallGPA] = useState(null);
   const [overallCredits, setOverallCredits] = useState(0);
   const [gpaByYear, setGpaByYear] = useState({});
@@ -27,7 +135,6 @@ const GpaCalculatorPage = () => {
   const [loadingData, setLoadingData] = useState(true);
   const [processing, setProcessing] = useState(false);
 
-  // Form states
   const [isYearFormOpen, setIsYearFormOpen] = useState(false);
   const [yearName, setYearName] = useState('');
   const [editingYearId, setEditingYearId] = useState(null);
@@ -42,35 +149,24 @@ const GpaCalculatorPage = () => {
   const [currentSemesterIdForModule, setCurrentSemesterIdForModule] = useState(null);
   const [editingModuleId, setEditingModuleId] = useState(null);
 
-  const fetchDataForUser = useCallback(async () => {
+  const getGpaStorageKey = useCallback(() => `${GPA_DATA_STORAGE_KEY_PREFIX}${user.id}`, [user]);
+
+  const fetchDataForUser = useCallback(() => {
     if (!user) return;
     setLoadingData(true);
-    try {
-      const { data: years, error: yearsError } = await supabase.from('academic_years').select('*').eq('user_id', user.id).order('created_at');
-      if (yearsError) throw yearsError;
-
-      const structuredData = await Promise.all(years.map(async (year) => {
-        const { data: semesters, error: semestersError } = await supabase.from('semesters').select('*').eq('academic_year_id', year.id).order('created_at');
-        if (semestersError) throw semestersError;
-
-        const semestersWithModules = await Promise.all(semesters.map(async (semester) => {
-          const { data: modules, error: modulesError } = await supabase.from('modules').select('*').eq('semester_id', semester.id).order('created_at');
-          if (modulesError) throw modulesError;
-          return { ...semester, modules };
-        }));
-        return { ...year, semesters: semestersWithModules };
-      }));
-      setAcademicData(structuredData);
-    } catch (error) {
-      toast({ title: "Error fetching data", description: error.message, variant: "destructive" });
-    } finally {
-      setLoadingData(false);
-    }
-  }, [user, toast]);
+    const data = loadFromLocalStorage(getGpaStorageKey(), []);
+    setAcademicData(data);
+    setLoadingData(false);
+  }, [user, getGpaStorageKey]);
 
   useEffect(() => {
     fetchDataForUser();
   }, [fetchDataForUser]);
+
+  const saveData = useCallback((newData) => {
+    saveToLocalStorage(getGpaStorageKey(), newData);
+    setAcademicData(newData); // Ensure state is updated for re-calculation
+  }, [getGpaStorageKey]);
 
   const calculateAllGPAs = useCallback(() => {
     let allModulesForOverall = [];
@@ -94,36 +190,27 @@ const GpaCalculatorPage = () => {
     setOverallCredits(credits);
     setGpaByYear(yearGpas);
     setGpaBySemester(semesterGpas);
-
   }, [academicData]);
 
   useEffect(() => {
     calculateAllGPAs();
   }, [academicData, calculateAllGPAs]);
 
-
-  // Year Operations
-  const handleYearSubmit = async (e) => {
+  const handleYearSubmit = (e) => {
     e.preventDefault();
     if (!user || !yearName.trim()) return;
     setProcessing(true);
-    const payload = { user_id: user.id, year_name: yearName.trim() };
-    try {
-      if (editingYearId) {
-        const { error } = await supabase.from('academic_years').update(payload).eq('id', editingYearId);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('academic_years').insert(payload);
-        if (error) throw error;
-      }
-      toast({ title: `Academic Year ${editingYearId ? 'Updated' : 'Added'}` });
-      fetchDataForUser();
-      setIsYearFormOpen(false); setYearName(''); setEditingYearId(null);
-    } catch (error) {
-      toast({ title: `Year ${editingYearId ? 'Update' : 'Add'} Error`, description: error.message, variant: "destructive" });
-    } finally {
-      setProcessing(false);
+    const currentData = loadFromLocalStorage(getGpaStorageKey(), []);
+    if (editingYearId) {
+      const updatedData = currentData.map(y => y.id === editingYearId ? { ...y, year_name: yearName.trim() } : y);
+      saveData(updatedData);
+    } else {
+      const newYear = { id: uuidv4(), user_id: user.id, year_name: yearName.trim(), semesters: [], created_at: new Date().toISOString() };
+      saveData([...currentData, newYear]);
     }
+    toast({ title: `Academic Year ${editingYearId ? 'Updated' : 'Added'}` });
+    setIsYearFormOpen(false); setYearName(''); setEditingYearId(null);
+    setProcessing(false);
   };
 
   const openYearForm = (year = null) => {
@@ -137,51 +224,38 @@ const GpaCalculatorPage = () => {
     setIsYearFormOpen(true);
   };
   
-  const deleteYear = async (yearId) => {
+  const deleteYear = (yearId) => {
     setProcessing(true);
-    try {
-      // Cascade delete: modules -> semesters -> year
-      const yearToDelete = academicData.find(y => y.id === yearId);
-      if (yearToDelete) {
-        for (const semester of yearToDelete.semesters) {
-          await supabase.from('modules').delete().eq('semester_id', semester.id);
-        }
-        await supabase.from('semesters').delete().eq('academic_year_id', yearId);
-      }
-      const { error } = await supabase.from('academic_years').delete().eq('id', yearId);
-      if (error) throw error;
-      toast({ title: "Academic Year Deleted" });
-      fetchDataForUser();
-    } catch (error) {
-      toast({ title: "Year Delete Error", description: error.message, variant: "destructive" });
-    } finally {
-      setProcessing(false);
-    }
+    const currentData = loadFromLocalStorage(getGpaStorageKey(), []);
+    const updatedData = currentData.filter(y => y.id !== yearId);
+    saveData(updatedData);
+    toast({ title: "Academic Year Deleted" });
+    setProcessing(false);
   };
 
-
-  // Semester Operations
-  const handleSemesterSubmit = async (e) => {
+  const handleSemesterSubmit = (e) => {
     e.preventDefault();
     if (!user || !currentYearIdForSemester || !semesterName.trim()) return;
     setProcessing(true);
-    const payload = { user_id: user.id, academic_year_id: currentYearIdForSemester, semester_name: semesterName.trim() };
-    try {
-      if (editingSemesterId) {
-        const { error } = await supabase.from('semesters').update(payload).eq('id', editingSemesterId);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('semesters').insert(payload);
-        if (error) throw error;
-      }
-      toast({ title: `Semester ${editingSemesterId ? 'Updated' : 'Added'}` });
-      fetchDataForUser();
-      setIsSemesterFormOpen(false); setSemesterName(''); setEditingSemesterId(null); setCurrentYearIdForSemester(null);
-    } catch (error) {
-      toast({ title: `Semester ${editingSemesterId ? 'Update' : 'Add'} Error`, description: error.message, variant: "destructive" });
-    } finally {
-      setProcessing(false);
+    const currentData = loadFromLocalStorage(getGpaStorageKey(), []);
+    const yearIndex = currentData.findIndex(y => y.id === currentYearIdForSemester);
+    if (yearIndex === -1) {
+      toast({ title: "Error", description: "Academic year not found.", variant: "destructive" });
+      setProcessing(false); return;
     }
+
+    if (editingSemesterId) {
+      currentData[yearIndex].semesters = currentData[yearIndex].semesters.map(s => 
+        s.id === editingSemesterId ? { ...s, semester_name: semesterName.trim() } : s
+      );
+    } else {
+      const newSemester = { id: uuidv4(), user_id: user.id, academic_year_id: currentYearIdForSemester, semester_name: semesterName.trim(), modules: [], created_at: new Date().toISOString() };
+      currentData[yearIndex].semesters.push(newSemester);
+    }
+    saveData(currentData);
+    toast({ title: `Semester ${editingSemesterId ? 'Updated' : 'Added'}` });
+    setIsSemesterFormOpen(false); setSemesterName(''); setEditingSemesterId(null); setCurrentYearIdForSemester(null);
+    setProcessing(false);
   };
 
   const openSemesterForm = (yearId, semester = null) => {
@@ -196,23 +270,19 @@ const GpaCalculatorPage = () => {
     setIsSemesterFormOpen(true);
   };
 
-  const deleteSemester = async (semesterId) => {
+  const deleteSemester = (semesterId) => {
     setProcessing(true);
-    try {
-      await supabase.from('modules').delete().eq('semester_id', semesterId);
-      const { error } = await supabase.from('semesters').delete().eq('id', semesterId);
-      if (error) throw error;
-      toast({ title: "Semester Deleted" });
-      fetchDataForUser();
-    } catch (error) {
-      toast({ title: "Semester Delete Error", description: error.message, variant: "destructive" });
-    } finally {
-      setProcessing(false);
-    }
+    const currentData = loadFromLocalStorage(getGpaStorageKey(), []);
+    const updatedData = currentData.map(year => ({
+      ...year,
+      semesters: year.semesters.filter(s => s.id !== semesterId)
+    }));
+    saveData(updatedData);
+    toast({ title: "Semester Deleted" });
+    setProcessing(false);
   };
 
-  // Module Operations
-  const handleModuleSubmit = async (e) => {
+  const handleModuleSubmit = (e) => {
     e.preventDefault();
     if (!user || !currentSemesterIdForModule || !moduleData.code.trim() || !moduleData.name.trim() || !moduleData.credits) return;
     setProcessing(true);
@@ -220,31 +290,43 @@ const GpaCalculatorPage = () => {
     const payload = {
       user_id: user.id, semester_id: currentSemesterIdForModule,
       module_code: moduleData.code.trim(), module_name: moduleData.name.trim(),
-      credits: parseFloat(moduleData.credits), grade: moduleData.grade || null, grade_points: gradePoints
+      credits: parseFloat(moduleData.credits), grade: moduleData.grade || null, grade_points: gradePoints,
+      created_at: new Date().toISOString()
     };
-    try {
-      if (editingModuleId) {
-        const { error } = await supabase.from('modules').update(payload).eq('id', editingModuleId);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('modules').insert(payload);
-        if (error) throw error;
-      }
-      toast({ title: `Module ${editingModuleId ? 'Updated' : 'Added'}` });
-      fetchDataForUser();
-      setIsModuleFormOpen(false); setModuleData({ code: '', name: '', credits: '', grade: '' }); setEditingModuleId(null); setCurrentSemesterIdForModule(null);
-    } catch (error) {
-      toast({ title: `Module ${editingModuleId ? 'Update' : 'Add'} Error`, description: error.message, variant: "destructive" });
-    } finally {
-      setProcessing(false);
+
+    const currentData = loadFromLocalStorage(getGpaStorageKey(), []);
+    let foundSemester = false;
+    const updatedData = currentData.map(year => ({
+      ...year,
+      semesters: year.semesters.map(semester => {
+        if (semester.id === currentSemesterIdForModule) {
+          foundSemester = true;
+          if (editingModuleId) {
+            return { ...semester, modules: semester.modules.map(m => m.id === editingModuleId ? { ...payload, id: editingModuleId } : m) };
+          } else {
+            return { ...semester, modules: [...semester.modules, { ...payload, id: uuidv4() }] };
+          }
+        }
+        return semester;
+      })
+    }));
+
+    if (!foundSemester) {
+      toast({ title: "Error", description: "Semester not found.", variant: "destructive" });
+      setProcessing(false); return;
     }
+
+    saveData(updatedData);
+    toast({ title: `Module ${editingModuleId ? 'Updated' : 'Added'}` });
+    setIsModuleFormOpen(false); setModuleData({ code: '', name: '', credits: '', grade: '' }); setEditingModuleId(null); setCurrentSemesterIdForModule(null);
+    setProcessing(false);
   };
 
-  const openModuleForm = (semesterId, module = null) => {
+  const openModuleForm = (semesterId, moduleItem = null) => {
     setCurrentSemesterIdForModule(semesterId);
-    if (module) {
-      setModuleData({ code: module.module_code, name: module.module_name, credits: module.credits.toString(), grade: module.grade || '' });
-      setEditingModuleId(module.id);
+    if (moduleItem) {
+      setModuleData({ code: moduleItem.module_code, name: moduleItem.module_name, credits: moduleItem.credits.toString(), grade: moduleItem.grade || '' });
+      setEditingModuleId(moduleItem.id);
     } else {
       setModuleData({ code: '', name: '', credits: '', grade: '' });
       setEditingModuleId(null);
@@ -252,21 +334,22 @@ const GpaCalculatorPage = () => {
     setIsModuleFormOpen(true);
   };
 
-  const deleteModule = async (moduleId) => {
+  const deleteModule = (moduleId) => {
     setProcessing(true);
-    try {
-      const { error } = await supabase.from('modules').delete().eq('id', moduleId);
-      if (error) throw error;
-      toast({ title: "Module Deleted" });
-      fetchDataForUser();
-    } catch (error) {
-      toast({ title: "Module Delete Error", description: error.message, variant: "destructive" });
-    } finally {
-      setProcessing(false);
-    }
+    const currentData = loadFromLocalStorage(getGpaStorageKey(), []);
+    const updatedData = currentData.map(year => ({
+      ...year,
+      semesters: year.semesters.map(semester => ({
+        ...semester,
+        modules: semester.modules.filter(m => m.id !== moduleId)
+      }))
+    }));
+    saveData(updatedData);
+    toast({ title: "Module Deleted" });
+    setProcessing(false);
   };
 
-  if (loadingData && !academicData.length) { // Show loader only on initial full load
+  if (loadingData && !academicData.length) {
     return <div className="flex items-center justify-center h-[calc(100vh-200px)]"><Loader2 className="h-12 w-12 animate-spin text-primary" /></div>;
   }
 
@@ -278,7 +361,7 @@ const GpaCalculatorPage = () => {
             <BarChart3 className="h-10 w-10 text-primary" />
             <div>
               <CardTitle className="text-3xl gradient-text">GPA Studio</CardTitle>
-              <CardDescription>Manage your academic progress and calculate GPA.</CardDescription>
+              <CardDescription>Manage your academic progress and calculate GPA locally.</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -312,87 +395,24 @@ const GpaCalculatorPage = () => {
           )}
 
           {academicData.map(year => (
-            <Card key={year.id} className="bg-card/80 shadow-md">
-              <CardHeader className="flex flex-row justify-between items-center p-4">
-                <div className="flex items-center space-x-2">
-                  <CalendarDays className="h-6 w-6 text-primary" />
-                  <CardTitle className="text-xl">{year.year_name}</CardTitle>
-                </div>
-                <div className="flex items-center space-x-2">
-                  {gpaByYear[year.id]?.gpa !== null && gpaByYear[year.id]?.gpa !== undefined && (
-                    <span className="text-sm font-semibold text-primary">
-                      Year GPA: {gpaByYear[year.id].gpa.toFixed(2)} (Credits: {gpaByYear[year.id].credits || 0})
-                    </span>
-                  )}
-                  <Button variant="ghost" size="icon" onClick={() => openYearForm(year)}><Edit3 className="h-4 w-4" /></Button>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button></AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader><AlertDialogTitle>Delete {year.year_name}?</AlertDialogTitle><AlertDialogDescription>This will delete the year and all its semesters and modules. This action cannot be undone.</AlertDialogDescription></AlertDialogHeader>
-                      <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={() => deleteYear(year.id)}>Delete</AlertDialogAction></AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                  <Button size="sm" variant="outline" onClick={() => openSemesterForm(year.id)}><PlusCircle className="mr-2 h-4 w-4" /> Add Semester</Button>
-                </div>
-              </CardHeader>
-              <CardContent className="p-4 space-y-3">
-                {year.semesters.length === 0 && <p className="text-sm text-muted-foreground pl-2">No semesters in this year. Add one!</p>}
-                {year.semesters.map(semester => (
-                  <Card key={semester.id} className="bg-background/70">
-                    <CardHeader className="flex flex-row justify-between items-center p-3">
-                      <div className="flex items-center space-x-2">
-                        <BookOpen className="h-5 w-5 text-accent" />
-                        <CardTitle className="text-lg">{semester.semester_name}</CardTitle>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        {gpaBySemester[semester.id]?.gpa !== null && gpaBySemester[semester.id]?.gpa !== undefined && (
-                          <span className="text-xs font-semibold text-accent">
-                            Sem GPA: {gpaBySemester[semester.id].gpa.toFixed(2)} (Credits: {gpaBySemester[semester.id].credits || 0})
-                          </span>
-                        )}
-                        <Button variant="ghost" size="icon" onClick={() => openSemesterForm(year.id, semester)}><Edit3 className="h-4 w-4" /></Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button></AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader><AlertDialogTitle>Delete {semester.semester_name}?</AlertDialogTitle><AlertDialogDescription>This will delete the semester and all its modules. This action cannot be undone.</AlertDialogDescription></AlertDialogHeader>
-                            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={() => deleteSemester(semester.id)}>Delete</AlertDialogAction></AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                        <Button size="xs" variant="outline" onClick={() => openModuleForm(semester.id)}><PlusCircle className="mr-1 h-3 w-3" /> Add Module</Button>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="p-3 space-y-2">
-                      {semester.modules.length === 0 && <p className="text-xs text-muted-foreground pl-2">No modules in this semester. Add some!</p>}
-                      {semester.modules.map(module => (
-                        <Card key={module.id} className="bg-background/50">
-                          <CardContent className="p-2 flex justify-between items-center">
-                            <div>
-                              <p className="font-medium text-sm">{module.module_code} - {module.module_name}</p>
-                              <p className="text-xs text-muted-foreground">Credits: {module.credits} | Grade: {module.grade || 'N/A'} (Points: {module.grade_points !== null ? parseFloat(module.grade_points).toFixed(2) : 'N/A'})</p>
-                            </div>
-                            <div className="flex items-center space-x-1">
-                              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => openModuleForm(semester.id, module)}><Edit3 className="h-3 w-3" /></Button>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive"><Trash2 className="h-3 w-3" /></Button></AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader><AlertDialogTitle>Delete {module.module_name}?</AlertDialogTitle><AlertDialogDescription>This action cannot be undone.</AlertDialogDescription></AlertDialogHeader>
-                                  <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={() => deleteModule(module.id)}>Delete</AlertDialogAction></AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </div>
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </CardContent>
-                  </Card>
-                ))}
-              </CardContent>
-            </Card>
+            <AcademicYearCard 
+              key={year.id}
+              year={year}
+              gpaByYear={gpaByYear}
+              onEditYear={openYearForm}
+              onDeleteYear={deleteYear}
+              onAddSemester={openSemesterForm}
+              onEditSemester={openSemesterForm}
+              onDeleteSemester={deleteSemester}
+              onAddModule={openModuleForm}
+              onEditModule={openModuleForm}
+              onDeleteModule={deleteModule}
+              gpaBySemester={gpaBySemester}
+            />
           ))}
         </CardContent>
       </Card>
 
-      {/* Year Form Dialog */}
       <Dialog open={isYearFormOpen} onOpenChange={setIsYearFormOpen}>
         <DialogContent><DialogHeader><DialogTitle>{editingYearId ? 'Edit' : 'Add'} Academic Year</DialogTitle></DialogHeader>
           <form onSubmit={handleYearSubmit} className="space-y-4 py-2">
@@ -402,7 +422,6 @@ const GpaCalculatorPage = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Semester Form Dialog */}
       <Dialog open={isSemesterFormOpen} onOpenChange={setIsSemesterFormOpen}>
         <DialogContent><DialogHeader><DialogTitle>{editingSemesterId ? 'Edit' : 'Add'} Semester</DialogTitle></DialogHeader>
           <form onSubmit={handleSemesterSubmit} className="space-y-4 py-2">
@@ -412,7 +431,6 @@ const GpaCalculatorPage = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Module Form Dialog */}
       <Dialog open={isModuleFormOpen} onOpenChange={setIsModuleFormOpen}>
         <DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>{editingModuleId ? 'Edit' : 'Add'} Module</DialogTitle></DialogHeader>
           <form onSubmit={handleModuleSubmit} className="space-y-3 py-2">
@@ -427,7 +445,6 @@ const GpaCalculatorPage = () => {
           </form>
         </DialogContent>
       </Dialog>
-
     </motion.div>
   );
 };
